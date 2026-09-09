@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+*.a
+*.so
+dpdk_router
+build/
+
+# Runtime/log files
+*.log
+*.pcap
+
+# Editor/OS files
+.vscode/
+.idea/
+*.swp
