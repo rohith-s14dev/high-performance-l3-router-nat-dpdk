@@ -1,6 +1,7 @@
 #include "common.h"
 #include "parser.h"
 #include "port_init.h"
+#include "routing.h"
 
 #include <arpa/inet.h>
 
@@ -44,11 +45,12 @@ static void print_packet_info(const struct packet_info *p)
 
 int main(int argc, char **argv)
 {
-    uint16_t port;
+    uint16_t port = 0;
     uint16_t nb_ports;
     uint64_t rx_packets = 0;
     uint64_t parsed_packets = 0;
-    uint64_t parse_errors = 0;
+    uint64_t route_hits = 0;
+    uint64_t route_misses = 0;
     uint64_t tx_packets = 0;
     uint64_t dropped_packets = 0;
 
@@ -75,12 +77,29 @@ int main(int argc, char **argv)
     if (mbuf_pool == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
-    port = 0;
     if (port_init(port, mbuf_pool) != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize port %u\n", port);
 
-    printf("DPDK router Phase 2 started on port %u\n", port);
-    printf("Parser: Ethernet/VLAN/IPv4/IPv6/TCP/UDP\n");
+    if (routing_init(rte_socket_id()) != 0)
+        rte_exit(EXIT_FAILURE, "Cannot initialize routing tables\n");
+
+    /*
+     * Two-port lab topology:
+     *   port 0 -> internal side
+     *   port 1 -> external side
+     *
+     * LPM rules can be changed in router.conf later.
+     */
+    routing_add_ipv4("10.0.0.0", 8, 0);
+    routing_add_ipv4("192.168.1.0", 24, 0);
+    routing_add_ipv4("0.0.0.0", 0, 1);
+
+    routing_add_ipv6("2001:db8:1::", 64, 0);
+    routing_add_ipv6("2001:db8:2::", 64, 1);
+    routing_add_ipv6("::", 0, 1);
+
+    printf("DPDK router Phase 3 started on port %u\n", port);
+    routing_print_summary();
 
     struct rte_mbuf *bufs[BURST_SIZE];
 
@@ -93,23 +112,33 @@ int main(int argc, char **argv)
 
         for (uint16_t i = 0; i < nb_rx; i++) {
             struct packet_info info;
+            uint16_t egress_port;
 
             if (parse_packet(bufs[i], &info) < 0) {
-                parse_errors++;
                 dropped_packets++;
                 rte_pktmbuf_free(bufs[i]);
                 continue;
             }
 
             parsed_packets++;
+
+            if (routing_lookup(&info, &egress_port) != 0) {
+                route_misses++;
+                dropped_packets++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+
+            route_hits++;
             print_packet_info(&info);
 
             /*
-             * Phase 2 only parses and inspects packets.
-             * Phase 3 will use the parsed destination address
-             * for IPv4/IPv6 LPM routing decisions.
+             * Phase 3 demonstrates the forwarding decision.
+             * A production L3 router would also resolve the next-hop
+             * L2 destination and rewrite the Ethernet header here.
              */
-            uint16_t nb_tx = rte_eth_tx_burst(port, 0, &bufs[i], 1);
+            uint16_t nb_tx = rte_eth_tx_burst(egress_port, 0,
+                                               &bufs[i], 1);
 
             if (nb_tx == 1)
                 tx_packets++;
@@ -120,15 +149,17 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("\n=== Phase 2 Statistics ===\n");
+    printf("\n=== Phase 3 Statistics ===\n");
     printf("RX packets      : %lu\n", rx_packets);
     printf("Parsed packets  : %lu\n", parsed_packets);
-    printf("Parse errors    : %lu\n", parse_errors);
+    printf("Route hits      : %lu\n", route_hits);
+    printf("Route misses    : %lu\n", route_misses);
     printf("TX packets      : %lu\n", tx_packets);
     printf("Dropped packets : %lu\n", dropped_packets);
 
     rte_eth_dev_stop(port);
     rte_eth_dev_close(port);
+    routing_free();
     rte_eal_cleanup();
 
     return 0;
