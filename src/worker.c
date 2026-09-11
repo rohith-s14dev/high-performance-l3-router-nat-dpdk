@@ -2,8 +2,10 @@
 #include "parser.h"
 #include "routing.h"
 #include "nat.h"
+#include "neighbor.h"
 
 #include <signal.h>
+#include <netinet/in.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
 
@@ -36,7 +38,19 @@ static int worker_loop(void *arg)
 
         for (uint16_t i = 0; i < n; i++) {
             struct packet_info info;
+            struct rte_ether_addr dst_mac;
             uint16_t egress_port;
+            int control;
+
+            control = neighbor_handle_control(bufs[i], ctx->port_id,
+                                              ctx->tx_queue);
+            if (control < 0) {
+                s->drops++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+            if (control > 0)
+                continue;
 
             if (parse_packet(bufs[i], &info) < 0) {
                 s->drops++;
@@ -67,6 +81,20 @@ static int worker_loop(void *arg)
             s->route_hits++;
 
             if (egress_port >= rte_eth_dev_count_avail()) {
+                s->drops++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+
+            if (neighbor_resolve(&info, egress_port, &dst_mac) != 0) {
+                /* No neighbor entry yet: ARP/ND resolution must populate the
+                 * cache before this packet can be transmitted. */
+                s->drops++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+
+            if (neighbor_rewrite_l2(bufs[i], egress_port, &dst_mac) != 0) {
                 s->drops++;
                 rte_pktmbuf_free(bufs[i]);
                 continue;
