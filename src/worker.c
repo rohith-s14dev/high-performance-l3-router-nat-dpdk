@@ -9,18 +9,26 @@
 
 #define WORKER_BURST 32
 
+struct worker_context {
+    uint16_t port_id;
+    uint16_t rx_queue;
+    uint16_t tx_queue;
+};
+
 static volatile sig_atomic_t worker_quit;
 static struct worker_stats stats[RTE_MAX_LCORE];
+static struct worker_context contexts[RTE_MAX_LCORE];
 
 static int worker_loop(void *arg)
 {
-    uint16_t port_id = (uint16_t)(uintptr_t)arg;
+    struct worker_context *ctx = arg;
     unsigned lcore_id = rte_lcore_id();
     struct worker_stats *s = &stats[lcore_id];
     struct rte_mbuf *bufs[WORKER_BURST];
 
     while (!worker_quit) {
-        uint16_t n = rte_eth_rx_burst(port_id, 0, bufs, WORKER_BURST);
+        uint16_t n = rte_eth_rx_burst(ctx->port_id, ctx->rx_queue,
+                                      bufs, WORKER_BURST);
         if (n == 0)
             continue;
 
@@ -58,7 +66,13 @@ static int worker_loop(void *arg)
 
             s->route_hits++;
 
-            if (rte_eth_tx_burst(egress_port, 0, &bufs[i], 1) == 1)
+            if (egress_port >= rte_eth_dev_count_avail()) {
+                s->drops++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+
+            if (rte_eth_tx_burst(egress_port, ctx->tx_queue, &bufs[i], 1) == 1)
                 s->tx++;
             else {
                 s->drops++;
@@ -73,14 +87,14 @@ static int worker_loop(void *arg)
 int worker_launch(uint16_t port_id, uint16_t rx_queue, uint16_t tx_queue,
                   unsigned lcore_id)
 {
-    (void)rx_queue;
-    (void)tx_queue;
-
-    if (!rte_lcore_is_enabled(lcore_id))
+    if (!rte_lcore_is_enabled(lcore_id) || lcore_id >= RTE_MAX_LCORE)
         return -1;
 
-    return rte_eal_remote_launch(worker_loop, (void *)(uintptr_t)port_id,
-                                 lcore_id);
+    contexts[lcore_id].port_id = port_id;
+    contexts[lcore_id].rx_queue = rx_queue;
+    contexts[lcore_id].tx_queue = tx_queue;
+
+    return rte_eal_remote_launch(worker_loop, &contexts[lcore_id], lcore_id);
 }
 
 void worker_print_stats(void)
