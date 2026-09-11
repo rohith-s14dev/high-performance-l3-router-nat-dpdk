@@ -4,8 +4,6 @@
 #include "nat.h"
 #include "worker.h"
 
-#include <arpa/inet.h>
-#include <rte_ethdev.h>
 #include <rte_lcore.h>
 
 static struct rte_mempool *mbuf_pool;
@@ -34,6 +32,9 @@ int main(int argc, char **argv)
 {
     int ret;
     uint16_t nb_ports;
+    uint16_t nb_queues = 1;
+    unsigned workers = 0;
+    unsigned lcore_id;
 
     ret = rte_eal_init(argc, argv);
     if (ret < 0)
@@ -46,6 +47,20 @@ int main(int argc, char **argv)
     if (nb_ports < 1)
         rte_exit(EXIT_FAILURE, "No available Ethernet ports\n");
 
+    /* Reserve one enabled worker lcore per RX/TX queue. */
+    RTE_LCORE_FOREACH_WORKER(lcore_id) {
+        if (workers >= 4)
+            break;
+        workers++;
+    }
+
+    if (workers == 0) {
+        printf("No worker lcores found. Start with at least -l 0-1.\n");
+        return EXIT_FAILURE;
+    }
+
+    nb_queues = (uint16_t)workers;
+
     mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
                                         MBUF_CACHE_SIZE, 0,
                                         RTE_MBUF_DEFAULT_BUF_SIZE,
@@ -53,11 +68,11 @@ int main(int argc, char **argv)
     if (mbuf_pool == NULL)
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
-    if (port_init(0, mbuf_pool) != 0)
-        rte_exit(EXIT_FAILURE, "Cannot initialize port 0\n");
+    if (port_init(0, nb_queues, mbuf_pool) != 0)
+        rte_exit(EXIT_FAILURE, "Cannot initialize port 0 with %u queues\n",
+                 nb_queues);
 
-    if (routing_init(rte_socket_id()) != 0 ||
-        init_routes() != 0)
+    if (routing_init(rte_socket_id()) != 0 || init_routes() != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize routing\n");
 
     struct nat_config nat_cfg = {
@@ -69,37 +84,34 @@ int main(int argc, char **argv)
     if (nat_init(rte_socket_id(), &nat_cfg) != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize NAT\n");
 
-    printf("DPDK router Phase 5: multi-core packet processing\n");
-    printf("Using burst processing and per-lcore statistics\n");
+    printf("DPDK router Phase 6: RSS + multi-queue data plane\n");
+    printf("Port 0: %u RX queues / %u TX queues\n", nb_queues, nb_queues);
 
-    unsigned workers = 0;
-    unsigned lcore_id;
-
+    workers = 0;
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
-        if (worker_launch(0, 0, 0, lcore_id) == 0)
-            workers++;
-        if (workers >= 2)
+        if (workers >= nb_queues)
             break;
+
+        if (worker_launch(0, (uint16_t)workers, (uint16_t)workers,
+                          lcore_id) != 0)
+            rte_exit(EXIT_FAILURE, "Cannot launch worker on lcore %u\n",
+                     lcore_id);
+
+        printf("lcore %u -> RX queue %u -> TX queue %u\n",
+               lcore_id, workers, workers);
+        workers++;
     }
 
-    if (workers == 0) {
-        printf("No worker lcores available; run with at least -l 0-1.\n");
-        worker_stop();
-    } else {
-        printf("Launched %u worker lcore(s)\n", workers);
+    while (!force_quit)
+        rte_pause();
 
-        while (!force_quit)
-            rte_pause();
-
-        worker_stop();
-        rte_eal_mp_wait_lcore();
-    }
+    worker_stop();
+    rte_eal_mp_wait_lcore();
 
     worker_print_stats();
-
     nat_print_stats();
-    rte_eth_dev_stop(0);
-    rte_eth_dev_close(0);
+
+    port_stop(0);
     routing_free();
     nat_free();
     rte_eal_cleanup();
