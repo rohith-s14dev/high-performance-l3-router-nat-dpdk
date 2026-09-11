@@ -250,9 +250,7 @@ static int handle_nd(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
         return -1;
 
     struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)((char *)eth + l3_offset);
-    if (ip6->proto != IPPROTO_ICMPV6)
-        return 0;
-    if (ip6->hop_limits != 255)
+    if (ip6->proto != IPPROTO_ICMPV6 || ip6->hop_limits != 255)
         return 0;
 
     size_t icmp_len = rte_be_to_cpu_16(ip6->payload_len);
@@ -302,7 +300,7 @@ static int handle_nd(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
 
     nd->type = ICMP6_NEIGHBOR_ADVERTISEMENT;
     nd->code = 0;
-    nd->flags = rte_cpu_to_be_32(source_unspecified ? 0x20000000U : 0x60000000U);
+    nd->flags = rte_cpu_to_be_32(source_unspecified ? 0xA0000000U : 0xE0000000U);
     nd->target = local_ports[port_id].ipv6;
 
     struct icmp6_nd_opt_lladdr *opt =
@@ -312,6 +310,12 @@ static int handle_nd(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
     opt->mac = local_ports[port_id].mac;
 
     size_t new_icmp_len = sizeof(*nd) + sizeof(*opt);
+    if (new_icmp_len > icmp_len &&
+        rte_pktmbuf_append(m, (uint16_t)(new_icmp_len - icmp_len)) == NULL) {
+        rte_pktmbuf_free(m);
+        return 1;
+    }
+
     ip6->payload_len = rte_cpu_to_be_16((uint16_t)new_icmp_len);
     nd->checksum = 0;
     nd->checksum = rte_cpu_to_be_16(
