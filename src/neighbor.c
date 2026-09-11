@@ -2,7 +2,7 @@
 #include "parser.h"
 
 #include <string.h>
-#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <rte_arp.h>
 #include <rte_byteorder.h>
@@ -46,22 +46,6 @@ static uint16_t checksum_fold(uint32_t sum)
     while (sum >> 16)
         sum = (sum & 0xffffU) + (sum >> 16);
     return (uint16_t)~sum;
-}
-
-static uint16_t checksum_bytes(const uint8_t *data, size_t len)
-{
-    uint32_t sum = 0;
-
-    while (len >= 2) {
-        sum += ((uint32_t)data[0] << 8) | data[1];
-        data += 2;
-        len -= 2;
-    }
-
-    if (len)
-        sum += (uint32_t)data[0] << 8;
-
-    return checksum_fold(sum);
 }
 
 static uint16_t icmp6_checksum(const struct rte_ipv6_hdr *ip6,
@@ -146,11 +130,6 @@ static int ipv6_is_unspecified(const struct rte_ipv6_addr *addr)
     return rte_ipv6_addr_eq(addr, &zero);
 }
 
-static int ipv6_is_multicast(const struct rte_ipv6_addr *addr)
-{
-    return addr->a[0] == 0xff;
-}
-
 static void set_all_nodes_multicast(struct rte_ipv6_addr *addr)
 {
     static const struct rte_ipv6_addr all_nodes =
@@ -215,16 +194,17 @@ static int handle_arp(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
         arp->arp_hlen != RTE_ETHER_ADDR_LEN || arp->arp_plen != 4)
         return -1;
 
-    if (arp->arp_data.arp_sip != 0)
-        if (learn_neighbor(port_id, 0, arp->arp_data.arp_sip, NULL,
-                           &arp->arp_data.arp_sha) == 0)
-            arp_learned++;
+    if (arp->arp_data.arp_sip != 0 &&
+        learn_neighbor(port_id, 0, arp->arp_data.arp_sip, NULL,
+                       &arp->arp_data.arp_sha) == 0)
+        arp_learned++;
 
     if (arp->arp_opcode != rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) ||
-        arp->arp_data.arp_tip != local_ports[port_id].ipv4)
+        arp->arp_data.arp_tip != local_ports[port_id].ipv4) {
+        rte_pktmbuf_free(m);
         return 1;
+    }
 
-    struct rte_ether_addr requester = arp->arp_data.arp_sha;
     uint32_t requester_ip = arp->arp_data.arp_sip;
 
     rte_ether_addr_copy(&eth->s_addr, &eth->d_addr);
@@ -270,7 +250,9 @@ static int handle_nd(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
         return -1;
 
     struct rte_ipv6_hdr *ip6 = (struct rte_ipv6_hdr *)((char *)eth + l3_offset);
-    if (ip6->proto != IPPROTO_ICMPV6 || ip6->hop_limits != 255)
+    if (ip6->proto != IPPROTO_ICMPV6)
+        return 0;
+    if (ip6->hop_limits != 255)
         return 0;
 
     size_t icmp_len = rte_be_to_cpu_16(ip6->payload_len);
@@ -281,25 +263,29 @@ static int handle_nd(struct rte_mbuf *m, uint16_t port_id, uint16_t tx_queue)
     struct icmp6_nd_hdr *nd = (struct icmp6_nd_hdr *)((char *)ip6 + sizeof(*ip6));
     struct rte_ether_addr src_mac = eth->s_addr;
 
-    if (!ipv6_is_unspecified(&ip6->src_addr)) {
-        if (learn_neighbor(port_id, 1, 0, &ip6->src_addr, &src_mac) == 0)
-            nd_learned++;
-    }
+    if (!ipv6_is_unspecified(&ip6->src_addr) &&
+        learn_neighbor(port_id, 1, 0, &ip6->src_addr, &src_mac) == 0)
+        nd_learned++;
 
     if (nd->type == ICMP6_NEIGHBOR_ADVERTISEMENT) {
         if (icmp_len >= sizeof(*nd) + sizeof(struct icmp6_nd_opt_lladdr)) {
             struct icmp6_nd_opt_lladdr *opt =
                 (struct icmp6_nd_opt_lladdr *)((char *)nd + sizeof(*nd));
-            if (opt->type == ICMP6_OPT_TARGET_LLADDR && opt->length == 1)
-                if (learn_neighbor(port_id, 1, 0, &nd->target, &opt->mac) == 0)
-                    nd_learned++;
+            if (opt->type == ICMP6_OPT_TARGET_LLADDR && opt->length == 1 &&
+                learn_neighbor(port_id, 1, 0, &nd->target, &opt->mac) == 0)
+                nd_learned++;
         }
+        rte_pktmbuf_free(m);
         return 1;
     }
 
-    if (nd->type != ICMP6_NEIGHBOR_SOLICITATION ||
-        !rte_ipv6_addr_eq(&nd->target, &local_ports[port_id].ipv6))
+    if (nd->type != ICMP6_NEIGHBOR_SOLICITATION)
+        return 0;
+
+    if (!rte_ipv6_addr_eq(&nd->target, &local_ports[port_id].ipv6)) {
+        rte_pktmbuf_free(m);
         return 1;
+    }
 
     struct rte_ipv6_addr original_src = ip6->src_addr;
     int source_unspecified = ipv6_is_unspecified(&original_src);
