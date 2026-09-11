@@ -5,6 +5,7 @@
 #include "neighbor.h"
 #include "worker.h"
 
+#include <signal.h>
 #include <rte_lcore.h>
 
 static struct rte_mempool *mbuf_pool;
