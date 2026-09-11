@@ -19,20 +19,19 @@ static void signal_handler(int signum)
 
 static int init_routes(uint16_t port_count)
 {
-    /* Keep the original two-interface topology when two ports exist.
-     * With one port, all routes stay on port 0 so the application can still
-     * run in a single-NIC lab environment. */
+    /* Two-port topology: 192.168.1.0/24 is on port 0 and 10.0.0.0/8 is
+     * on port 1. With one port, all routes remain on port 0 for lab use. */
     if (port_count >= 2) {
-        if (routing_add_ipv4("10.0.0.0", 8, 0) < 0 ||
-            routing_add_ipv4("192.168.1.0", 24, 0) < 0 ||
+        if (routing_add_ipv4("192.168.1.0", 24, 0) < 0 ||
+            routing_add_ipv4("10.0.0.0", 8, 1) < 0 ||
             routing_add_ipv4("0.0.0.0", 0, 1) < 0 ||
             routing_add_ipv6("2001:db8:1::", 64, 0) < 0 ||
             routing_add_ipv6("2001:db8:2::", 64, 1) < 0 ||
             routing_add_ipv6("::", 0, 1) < 0)
             return -1;
     } else {
-        if (routing_add_ipv4("10.0.0.0", 8, 0) < 0 ||
-            routing_add_ipv4("192.168.1.0", 24, 0) < 0 ||
+        if (routing_add_ipv4("192.168.1.0", 24, 0) < 0 ||
+            routing_add_ipv4("10.0.0.0", 8, 0) < 0 ||
             routing_add_ipv4("0.0.0.0", 0, 0) < 0 ||
             routing_add_ipv6("2001:db8:1::", 64, 0) < 0 ||
             routing_add_ipv6("2001:db8:2::", 64, 0) < 0 ||
@@ -47,8 +46,9 @@ int main(int argc, char **argv)
 {
     int ret;
     uint16_t nb_ports;
-    uint16_t nb_queues = 1;
-    unsigned workers = 0;
+    uint16_t nb_queues;
+    unsigned worker_count = 0;
+    unsigned launch_index = 0;
     unsigned lcore_id;
 
     ret = rte_eal_init(argc, argv);
@@ -65,19 +65,19 @@ int main(int argc, char **argv)
     /* Phase 7 uses up to two interfaces. */
     active_ports = nb_ports >= 2 ? 2 : 1;
 
-    /* Reserve one enabled worker lcore per RX/TX queue. */
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
-        if (workers >= 4)
+        if (worker_count >= 4)
             break;
-        workers++;
+        worker_count++;
     }
 
-    if (workers == 0) {
+    if (worker_count == 0) {
         printf("No worker lcores found. Start with at least -l 0-1.\n");
         return EXIT_FAILURE;
     }
 
-    nb_queues = (uint16_t)workers;
+    /* Each port has one queue for every worker assigned to that port. */
+    nb_queues = (uint16_t)((worker_count + active_ports - 1) / active_ports);
 
     mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
                                         MBUF_CACHE_SIZE, 0,
@@ -112,19 +112,20 @@ int main(int argc, char **argv)
     printf("Active ports: %u, queues per port: %u\n", active_ports, nb_queues);
     printf("Neighbor cache learns from ARP/ND and performs L2 rewrite.\n");
 
-    workers = 0;
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
-        if (workers >= nb_queues)
+        if (launch_index >= worker_count)
             break;
 
-        if (worker_launch(0, (uint16_t)workers, (uint16_t)workers,
-                          lcore_id) != 0)
+        uint16_t port = (uint16_t)(launch_index % active_ports);
+        uint16_t queue = (uint16_t)(launch_index / active_ports);
+
+        if (worker_launch(port, queue, queue, lcore_id) != 0)
             rte_exit(EXIT_FAILURE, "Cannot launch worker on lcore %u\n",
                      lcore_id);
 
-        printf("lcore %u -> RX queue %u -> TX queue %u\n",
-               lcore_id, workers, workers);
-        workers++;
+        printf("lcore %u -> port %u RX queue %u -> TX queue %u\n",
+               lcore_id, port, queue, queue);
+        launch_index++;
     }
 
     while (!force_quit)
