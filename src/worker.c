@@ -3,6 +3,7 @@
 #include "routing.h"
 #include "nat.h"
 #include "neighbor.h"
+#include "forward.h"
 
 #include <signal.h>
 #include <netinet/in.h>
@@ -86,9 +87,15 @@ static int worker_loop(void *arg)
                 continue;
             }
 
+            if (forward_prepare(bufs[i], &info) != 0) {
+                /* TTL/Hop-Limit expiry or malformed L3 packet. */
+                s->drops++;
+                rte_pktmbuf_free(bufs[i]);
+                continue;
+            }
+
             if (neighbor_resolve(&info, egress_port, &dst_mac) != 0) {
-                /* No neighbor entry yet: ARP/ND resolution must populate the
-                 * cache before this packet can be transmitted. */
+                /* ARP/ND must populate the neighbor cache before forwarding. */
                 s->drops++;
                 rte_pktmbuf_free(bufs[i]);
                 continue;
