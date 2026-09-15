@@ -1,7 +1,5 @@
 #include "forward.h"
 
-#include <netinet/in.h>
-
 #include <rte_byteorder.h>
 #include <rte_ip.h>
 #include <rte_ip6.h>
@@ -28,8 +26,7 @@ static uint16_t ipv4_checksum(const struct rte_ipv4_hdr *ip4)
 static int ipv4_is_multicast(uint32_t addr)
 {
     uint32_t host = rte_be_to_cpu_32(addr);
-    return (host >= RTE_IPV4(224, 0, 0, 0) &&
-            host <= RTE_IPV4(239, 255, 255, 255));
+    return host >= 0xe0000000U && host <= 0xefffffffU;
 }
 
 static int prepare_ipv4(struct rte_mbuf *m, struct packet_info *info)
@@ -41,7 +38,7 @@ static int prepare_ipv4(struct rte_mbuf *m, struct packet_info *info)
     if (rte_pktmbuf_data_len(m) < info->l3_offset + sizeof(*ip4))
         return -1;
 
-    ihl = (ip4->version_ihl & 0x0fU) * 4U;
+    ihl = (uint8_t)((ip4->version_ihl & 0x0fU) * 4U);
     if ((ip4->version_ihl >> 4) != 4 || ihl < sizeof(*ip4) ||
         rte_pktmbuf_data_len(m) < info->l3_offset + ihl)
         return -1;
@@ -51,19 +48,14 @@ static int prepare_ipv4(struct rte_mbuf *m, struct packet_info *info)
         total_len > rte_pktmbuf_data_len(m) - info->l3_offset)
         return -1;
 
-    if (ipv4_is_multicast(ip4->dst_addr))
-        return 0;
+    if (!ipv4_is_multicast(ip4->dst_addr)) {
+        if (ip4->time_to_live <= 1)
+            return -1;
+        ip4->time_to_live--;
+    }
 
-    if (ip4->time_to_live <= 1)
-        return -1;
-
-    ip4->time_to_live--;
-
-    /* NAT may have changed src_addr/port before this function runs.
-     * Recompute the IPv4 header checksum from the resulting header. */
     ip4->hdr_checksum = 0;
     ip4->hdr_checksum = rte_cpu_to_be_16(ipv4_checksum(ip4));
-
     return 0;
 }
 
