@@ -81,10 +81,13 @@ static uint16_t l4_checksum_ipv4(struct packet_info *info)
     l4_len = (uint16_t)(total_len - ihl);
     l4 = (uint8_t *)ip4 + ihl;
 
-    sum += (uint32_t)(ip4->src_addr >> 16);
-    sum += (uint32_t)(ip4->src_addr & 0xffffU);
-    sum += (uint32_t)(ip4->dst_addr >> 16);
-    sum += (uint32_t)(ip4->dst_addr & 0xffffU);
+    uint32_t src_addr = rte_be_to_cpu_32(ip4->src_addr);
+    uint32_t dst_addr = rte_be_to_cpu_32(ip4->dst_addr);
+
+    sum += (uint32_t)(src_addr >> 16);
+    sum += (uint32_t)(src_addr & 0xffffU);
+    sum += (uint32_t)(dst_addr >> 16);
+    sum += (uint32_t)(dst_addr & 0xffffU);
     sum += (uint32_t)ip4->next_proto_id;
     sum += l4_len;
 
