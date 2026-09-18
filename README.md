@@ -62,7 +62,21 @@ A learning and portfolio project for building a high-performance user-space L3 r
 - Preserve the IPv6 header without an IPv6 header checksum, as required by the IPv6 design.
 - Keep the forwarding order explicit: NAT → route lookup → L3 forwarding update → neighbor resolution → L2 rewrite → TX.
 
-The Phase 8 forwarding module is intentionally separated from packet parsing and neighbor handling so the dataplane stages are easier to test and extend. Transport-layer checksum updates for NAT, ICMP Time Exceeded generation, IPv6 extension-header traversal, and active neighbor-resolution timers remain future hardening work.
+The Phase 8 forwarding module is intentionally separated from packet parsing and neighbor handling so the dataplane stages are easier to test and extend.
+
+### Phase 9 — Bidirectional NAT + Flow Aging
+- Reverse NAT for inbound IPv4 TCP/UDP traffic.
+- Separate forward and reverse DPDK hash indexes.
+- Preserve the original inside source IP/port for reverse translation.
+- Recompute TCP/UDP checksums after source or destination NAT changes.
+- Refresh a flow's last-seen timestamp on both directions.
+- Expire idle NAT flows using a configurable timeout.
+- Protect the shared NAT tables with a DPDK spinlock for the multi-core lab dataplane.
+- Periodically run NAT table maintenance from one worker.
+- Report reverse translations, checksum updates, and expired flows.
+
+The Phase 9 NAT implementation is still intentionally a learning/portfolio implementation. It does not yet implement TCP connection-state tracking, FIN/RST-aware teardown, protocol-specific UDP/TCP timeouts, ICMP NAT, hairpin NAT, or a high-performance lock-free flow allocator.
+
 
 ## Build
 Requires a Linux system with DPDK development packages.
@@ -82,8 +96,9 @@ sudo ./dpdk_router -l 0-4 -n 4
 With two ports and four worker lcores, startup is similar to:
 
 ```text
-DPDK router Phase 8: L3 forwarding + TTL/Hop-Limit handling
+DPDK router Phase 9: bidirectional NAT + flow aging
 Active ports: 2, queues per port: 2
+NAT public IP: 203.0.113.10, flow timeout: 60 seconds
 lcore 1 -> port 0 RX queue 0 -> TX queue 0
 lcore 2 -> port 1 RX queue 0 -> TX queue 0
 lcore 3 -> port 0 RX queue 1 -> TX queue 1
