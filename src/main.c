@@ -63,7 +63,6 @@ int main(int argc, char **argv)
     if (nb_ports < 1)
         rte_exit(EXIT_FAILURE, "No available Ethernet ports\n");
 
-    /* Phase 7 uses up to two interfaces. */
     active_ports = nb_ports >= 2 ? 2 : 1;
 
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
@@ -77,7 +76,6 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /* Each port has one queue for every worker assigned to that port. */
     nb_queues = (uint16_t)((worker_count + active_ports - 1) / active_ports);
 
     mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
@@ -100,7 +98,8 @@ int main(int argc, char **argv)
     struct nat_config nat_cfg = {
         .public_ip = rte_cpu_to_be_32(RTE_IPV4(203, 0, 113, 10)),
         .public_port_min = 10000,
-        .public_port_max = 60000
+        .public_port_max = 60000,
+        .flow_timeout_sec = 60
     };
 
     if (nat_init(rte_socket_id(), &nat_cfg) != 0)
@@ -109,9 +108,11 @@ int main(int argc, char **argv)
     if (neighbor_init() != 0)
         rte_exit(EXIT_FAILURE, "Cannot initialize neighbor subsystem\n");
 
-    printf("DPDK router Phase 7: RSS + multi-queue + ARP/IPv6 ND\n");
-    printf("Active ports: %u, queues per port: %u\n", active_ports, nb_queues);
-    printf("Neighbor cache learns from ARP/ND and performs L2 rewrite.\n");
+    printf("DPDK router Phase 9: bidirectional NAT + flow aging\n");
+    printf("Active ports: %u, queues per port: %u\n",
+           active_ports, nb_queues);
+    printf("NAT public IP: 203.0.113.10, flow timeout: %u seconds\n",
+           nat_cfg.flow_timeout_sec);
 
     RTE_LCORE_FOREACH_WORKER(lcore_id) {
         if (launch_index >= worker_count)
