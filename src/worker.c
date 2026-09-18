@@ -9,8 +9,10 @@
 #include <netinet/in.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
+#include <rte_cycles.h>
 
 #define WORKER_BURST 32
+#define NAT_MAINTENANCE_INTERVAL_SEC 1
 
 struct worker_context {
     uint16_t port_id;
@@ -28,8 +30,23 @@ static int worker_loop(void *arg)
     unsigned lcore_id = rte_lcore_id();
     struct worker_stats *s = &stats[lcore_id];
     struct rte_mbuf *bufs[WORKER_BURST];
+    uint64_t last_nat_maintenance = 0;
+    uint64_t maintenance_interval =
+        (uint64_t)NAT_MAINTENANCE_INTERVAL_SEC * rte_get_timer_hz();
 
     while (!worker_quit) {
+        /* One worker owns periodic NAT table maintenance. The mapping used
+         * by main.c always assigns port 0 / queue 0 to exactly one worker. */
+        if (ctx->port_id == 0 && ctx->rx_queue == 0) {
+            uint64_t now = rte_get_timer_cycles();
+
+            if (last_nat_maintenance == 0 ||
+                now - last_nat_maintenance >= maintenance_interval) {
+                nat_maintenance();
+                last_nat_maintenance = now;
+            }
+        }
+
         uint16_t n = rte_eth_rx_burst(ctx->port_id, ctx->rx_queue,
                                       bufs, WORKER_BURST);
         if (n == 0)
@@ -64,11 +81,20 @@ static int worker_loop(void *arg)
             if (info.ip_version == 4 &&
                 (info.protocol == IPPROTO_TCP ||
                  info.protocol == IPPROTO_UDP)) {
-                if (nat_translate_outbound(&info) != 0) {
+
+                int nat_result;
+
+                if (nat_is_public_destination(&info))
+                    nat_result = nat_translate_inbound(&info);
+                else
+                    nat_result = nat_translate_outbound(&info);
+
+                if (nat_result != 0) {
                     s->drops++;
                     rte_pktmbuf_free(bufs[i]);
                     continue;
                 }
+
                 s->nat_packets++;
             }
 
